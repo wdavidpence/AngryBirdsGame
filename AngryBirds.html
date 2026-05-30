@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Angry Birds Clone</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #87CEEB; touch-action: none; user-select: none; -webkit-user-select: none; }
+canvas { display: block; width: 100%; height: 100%; }
+#ui { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; pointer-events: none; font-family: 'Arial Black', Arial, sans-serif; color: white; text-shadow: 2px 2px 4px rgba(0,0,0,0.7); font-size: 20px; z-index: 10; }
+#ui div { background: rgba(0,0,0,0.3); padding: 5px 15px; border-radius: 10px; }
+#message { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: 'Arial Black', Arial, sans-serif; color: white; text-shadow: 3px 3px 6px rgba(0,0,0,0.8); font-size: 42px; z-index: 20; display: none; text-align: center; pointer-events: auto; cursor: pointer; }
+#message .sub { font-size: 18px; margin-top: 15px; color: #FFD700; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <div id="scoreDisplay">Score: 0</div>
+  <div id="levelDisplay">Level 1</div>
+  <div id="birdsLeft">Birds: 3</div>
+</div>
+<div id="message" onclick="handleMessageClick()">
+  <span id="msgText"></span>
+  <div class="sub" id="msgSub"></div>
+</div>
+
+<script>
+// Fixed and improved Angry Birds clone
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Sound system (Web Audio API, procedural)
+let audioCtx = null;
+function initAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+}
+const SoundFX = {
+    play(type) {
+        if (!audioCtx) return;
+        try {
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            switch(type) {
+                case 'stretch':
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(280, now);
+                    osc.frequency.linearRampToValueAtTime(420, now + 0.12);
+                    gain.gain.setValueAtTime(0.07, now);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+                    osc.start(now); osc.stop(now + 0.15);
+                    break;
+                case 'launch':
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(200, now);
+                    osc.frequency.exponentialRampToValueAtTime(80, now + 0.18);
+                    gain.gain.setValueAtTime(0.1, now);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+                    osc.start(now); osc.stop(now + 0.2);
+                    break;
+                case 'hit':
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(350, now);
+                    osc.frequency.exponentialRampToValueAtTime(120, now + 0.08);
+                    gain.gain.setValueAtTime(0.09, now);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+                    osc.start(now); osc.stop(now + 0.1);
+                    break;
+                case 'pig':
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(500, now);
+                    osc.frequency.exponentialRampToValueAtTime(90, now + 0.25);
+                    gain.gain.setValueAtTime(0.11, now);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+                    osc.start(now); osc.stop(now + 0.28);
+                    break;
+                case 'levelComplete':
+                    osc.type = 'sine';
+                    const notes = [523, 659, 784, 1047];
+                    notes.forEach((freq, i) => {
+                        osc.frequency.setValueAtTime(freq, now + i * 0.13);
+                    });
+                    gain.gain.setValueAtTime(0.1, now);
+                    gain.gain.setValueAtTime(0.1, now + 0.45);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+                    osc.start(now); osc.stop(now + 0.6);
+                    break;
+            }
+        } catch(e) {}
+    }
+};
+
+// Physics constants
+const GRAVITY = 980;
+const GROUND_Y_RATIO = 0.82;
+let groundY;
+const RESTITUTION = 0.4;
+const FRICTION = 0.75;
+
+// Game state
+let score = 0;
+let currentLevel = 0;
+let birdsRemaining = 0;
+let gameState = 'menu';
+let settleTimer = 0;
+const SETTLE_TIME = 2.2;
+
+// Slingshot
+const slingX = () => W * 0.18;
+const slingY = () => groundY - 55;
+const SLING_MAX_DRAG = 95;
+
+// Entities
+let birds = [];
+let blocks = [];
+let pigs = [];
+let particles = [];
+let currentBird = null;
+let dragging = false;
+let dragStartX, dragStartY;
+let trailPoints = [];
+let lastStretchTime = 0;
+let aimPreviewPoints = [];
+
+// Materials
+const MATERIALS = {
+    wood:  { color: '#D2A560', health: 75,  density: 1.5, scoreVal: 60 },
+    stone: { color: '#9E9E9E', health: 160, density: 3,   scoreVal: 90 },
+    glass: { color: 'rgba(173,216,230,0.85)', health: 35, density: 0.7, scoreVal: 40 }
+};
+
+// Classes (same as before but cleaned)
+class Bird {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.vx = 0; this.vy = 0;
+        this.r = 16;
+        this.active = false;
+        this.launched = false;
+        this.alive = true;
+        this.trailTimer = 0;
+        this.dashReady = true;
+        this.dashed = false;
+    }
+}
+
+class Block {
+    constructor(x, y, w, h, material) {
+        this.x = x; this.y = y;
+        this.w = w; this.h = h;
+        this.vx = 0; this.vy = 0;
+        this.material = material;
+        this.health = MATERIALS[material].health;
+        this.maxHealth = this.health;
+        this.alive = true;
+    }
+}
+
+class Pig {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.r = 18;
+        this.vx = 0; this.vy = 0;
+        this.health = 55;
+        this.maxHealth = this.health;
+        this.alive = true;
+    }
+}
+
+class Particle {
+    constructor(x, y, color) {
+        this.x = x; this.y = y;
+        this.vx = (Math.random() - 0.5) * 320;
+        this.vy = (Math.random() - 0.5) * 320 - 120;
+        this.life = 0.45 + Math.random() * 0.55;
+        this.maxLife = this.life;
+        this.color = color;
+        this.size = 2.5 + Math.random() * 3.5;
+    }
+}
+
+// LEVELS - FIXED: positions calculated at runtime in loadLevel
+const LEVELS = [
+    { // Level 1
+        birds: 3,
+        structures: (W, groundY) => [{
+            type: 'tower', x: W*0.68, y: groundY,
+            blocks: [{ mat: 'wood', w: 22, h: 85 }, { mat: 'wood', w: 22, h: 85 }],
+            pigs: [{ dx: 0, dy: -12 }]
+        }],
+        par: 520
+    },
+    { // Level 2
+        birds: 3,
+        structures: (W, groundY) => [{
+            type: 'fort', x: W*0.62, y: groundY,
+            blocks: [{ mat: 'stone', w: 22, h: 72 }, { mat: 'stone', w: 22, h: 72 }, { mat: 'wood', w: 110, h: 18 }],
+            pigs: [{ dx: -32, dy: -42 }, { dx: 32, dy: -42 }]
+        }],
+        par: 850
+    },
+    { // Level 3
+        birds: 4,
+        structures: (W, groundY) => [
+            { type: 'house', x: W*0.55, y: groundY,
+              blocks: [{ mat: 'glass', w: 16, h: 62 }, { mat: 'glass', w: 16, h: 62 }, { mat: 'wood', w: 85, h: 14 }],
+              pigs: [{ dx: 0, dy: -38 }] },
+            { type: 'tower', x: W*0.78, y: groundY,
+              blocks: [{ mat: 'wood', w: 20, h: 95 }, { mat: 'wood', w: 20, h: 95 }],
+              pigs: [{ dx: -26, dy: -52 }, { dx: 26, dy: -52 }] }
+        ],
+        par: 1250
+    },
+    { // Level 4
+        birds: 4,
+        structures: (W, groundY) => [
+            { type: 'fort', x: W*0.48, y: groundY,
+              blocks: [{ mat: 'stone', w: 22, h: 82 }, { mat: 'stone', w: 22, h: 82 }, { mat: 'wood', w: 105, h: 16 }],
+              pigs: [{ dx: -30, dy: -48 }, { dx: 30, dy: -48 }] },
+            { type: 'tower', x: W*0.74, y: groundY,
+              blocks: [{ mat: 'glass', w: 16, h: 105 }],
+              pigs: [{ dx: 0, dy: -62 }] }
+        ],
+        par: 1550
+    },
+    { // Level 5 - Final
+        birds: 5,
+        structures: (W, groundY) => [
+            { type: 'fort', x: W*0.52, y: groundY,
+              blocks: [{ mat: 'stone', w: 24, h: 92 }, { mat: 'stone', w: 24, h: 92 }, { mat: 'wood', w: 115, h: 16 }],
+              pigs: [{ dx: -36, dy: -52 }, { dx: 36, dy: -52 }] },
+            { type: 'tower', x: W*0.73, y: groundY,
+              blocks: [{ mat: 'wood', w: 20, h: 65 }, { mat: 'wood', w: 20, h: 65 }, { mat: 'glass', w: 75, h: 14 }],
+              pigs: [{ dx: 0, dy: -42 }] }
+        ],
+        par: 2100
+    }
+];
+
+function loadLevel(idx) {
+    if (idx >= LEVELS.length) { idx = LEVELS.length - 1; }
+    currentLevel = idx;
+    const lvlDef = LEVELS[idx];
+    birdsRemaining = lvlDef.birds;
+    score = 0;
+    blocks = [];
+    pigs = [];
+    particles = [];
+    trailPoints = [];
+
+    groundY = H * GROUND_Y_RATIO;
+
+    // Create bird queue
+    birds = [];
+    for (let i = 0; i < lvlDef.birds; i++) {
+        let b = new Bird(slingX() - 30, slingY() + 18);
+        birds.push(b);
+    }
+
+    // Build structures using runtime positions
+    const structures = lvlDef.structures(W, groundY);
+    structures.forEach(struct => {
+        const bx = struct.x;
+        if (struct.type === 'tower') {
+            let totalH = 0;
+            struct.blocks.forEach((b, i) => {
+                blocks.push(new Block(bx - b.w/2, groundY - b.h/2 - totalH - (i > 0 ? 6 : 0), b.w, b.h, b.mat));
+                totalH += b.h + 6;
+            });
+            if (struct.pigs) {
+                struct.pigs.forEach(p => {
+                    pigs.push(new Pig(bx + (p.dx || 0), groundY - totalH - p.dy));
+                });
+            }
+        } else if (struct.type === 'fort') {
+            let pillarW = struct.blocks[0].w;
+            let pillarH = struct.blocks[0].h;
+            blocks.push(new Block(bx - 48, groundY - pillarH/2, pillarW, pillarH, struct.blocks[0].mat));
+            blocks.push(new Block(bx + 48, groundY - pillarH/2, pillarW, pillarH, struct.blocks[1].mat));
+            let roof = struct.blocks[2];
+            blocks.push(new Block(bx, groundY - pillarH - roof.h/2, roof.w, roof.h, roof.mat));
+            if (struct.pigs) {
+                struct.pigs.forEach(p => {
+                    pigs.push(new Pig(bx + (p.dx || 0), groundY - pillarH - roof.h - p.dy));
+                });
+            }
+        } else if (struct.type === 'house') {
+            let wallH = struct.blocks[0].h;
+            blocks.push(new Block(bx - 36, groundY - wallH/2, 16, wallH, struct.blocks[0].mat));
+            blocks.push(new Block(bx + 36, groundY - wallH/2, 16, wallH, struct.blocks[1].mat));
+            let roof = struct.blocks[2];
+            blocks.push(new Block(bx, groundY - wallH - roof.h/2, roof.w, roof.h, roof.mat));
+            if (struct.pigs) {
+                struct.pigs.forEach(p => {
+                    pigs.push(new Pig(bx + (p.dx || 0), groundY - wallH/2 - p.dy));
+                });
+            }
+        }
+    });
+
+    spawnBird();
+    gameState = 'aiming';
+    updateUI();
+}
+
+function spawnBird() {
+    if (birdsRemaining <= 0) return;
+    currentBird = birds[birds.length - birdsRemaining];
+    currentBird.x = slingX();
+    currentBird.y = slingY();
+    currentBird.vx = 0; currentBird.vy = 0;
+    currentBird.launched = false;
+    currentBird.active = true;
+    trailPoints = [];
+}
+
+function updateUI() {
+    document.getElementById('scoreDisplay').textContent = 'Score: ' + score;
+    document.getElementById('levelDisplay').textContent = 'Level ' + (currentLevel + 1);
+    document.getElementById('birdsLeft').textContent = 'Birds: ' + birdsRemaining;
+}
+
+function showMessage(text, sub) {
+    const el = document.getElementById('message');
+    document.getElementById('msgText').textContent = text;
+    document.getElementById('msgSub').textContent = sub || '';
+    el.style.display = 'block';
+}
+
+function hideMessage() {
+    document.getElementById('message').style.display = 'none';
+}
+
+function handleMessageClick() {
+    if (gameState === 'menu') {
+        gameState = 'playing';
+        hideMessage();
+        loadLevel(0);
+    } else if (gameState === 'levelComplete' || gameState === 'win') {
+        currentLevel++;
+        if (currentLevel >= LEVELS.length) {
+            gameState = 'win';
+            showMessage('YOU WIN!', 'All levels complete! Tap to play again');
+        } else {
+            gameState = 'playing';
+            hideMessage();
+            loadLevel(currentLevel);
+        }
+    } else if (gameState === 'gameOver') {
+        gameState = 'menu';
+        hideMessage();
+        showMessage('ANGRY BIRDS', 'Tap to play');
+    }
+}
+
+// Collision helpers (improved)
+function circleRect(cx, cy, cr, rx, ry, rw, rh) {
+    let nearX = Math.max(rx - rw/2, Math.min(cx, rx + rw/2));
+    let nearY = Math.max(ry - rh/2, Math.min(cy, ry + rh/2));
+    let dx = cx - nearX;
+    let dy = cy - nearY;
+    return (dx * dx + dy * dy) < (cr * cr);
+}
+
+function circleCircle(x1, y1, r1, x2, y2, r2) {
+    let dx = x1 - x2;
+    let dy = y1 - y2;
+    return (dx*dx + dy*dy) < ((r1+r2)*(r1+r2));
+}
+
+function resolveCollision(a, b) {
+    // Simplified but robust collision response
+    if (a instanceof Bird || a instanceof Pig) {
+        let cr = a.r || 0;
+        let cx = a.x, cy = a.y;
+        let cvx = a.vx, cvy = a.vy;
+
+        if (b instanceof Block) {
+            if (circleRect(cx, cy, cr, b.x, b.y, b.w, b.h)) {
+                let nearX = Math.max(b.x - b.w/2, Math.min(cx, b.x + b.w/2));
+                let nearY = Math.max(b.y - b.h/2, Math.min(cy, b.y + b.h/2));
+                let dx = cx - nearX || 0.01;
+                let dy = cy - nearY || 0.01;
+                let len = Math.sqrt(dx*dx + dy*dy);
+                let nx = dx / len, ny = dy / len;
+
+                let impactV = Math.abs(cvx * nx + cvy * ny);
+                a.vx = cvx * RESTITUTION * 0.6 - nx * 1.1;
+                a.vy = cvy * RESTITUTION * 0.6 - ny * 1.1;
+
+                b.vx += cvx * 0.35;
+                b.vy += cvy * 0.35;
+
+                if (impactV > 55) {
+                    b.health -= impactV * 1.25;
+                    spawnParticles(nearX, nearY, MATERIALS[b.material].color, 4);
+                    SoundFX.play('hit');
+                }
+            }
+        } else if (b instanceof Pig) {
+            let dx = cx - b.x;
+            let dy = cy - b.y;
+            let dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
+            let nx = dx/dist, ny = dy/dist;
+            let impactV = Math.sqrt(cvx*cvx + cvy*cvy);
+
+            a.vx = -cvx * RESTITUTION * 0.55 + nx * 1.5;
+            a.vy = -cvy * RESTITUTION * 0.55 + ny * 1.5;
+            b.vx += cvx * 0.65;
+            b.vy += cvy * 0.65;
+
+            if (impactV > 45) {
+                b.health -= impactV * 1.4;
+                spawnParticles((cx+b.x)/2, (cy+b.y)/2, '#4CAF50', 5);
+                SoundFX.play('pig');
+            }
+        }
+    }
+
+    // Destruction checks
+    if (b instanceof Block && b.health <= 0 && b.alive) destroyBlock(b);
+    if (b instanceof Pig && b.health <= 0 && b.alive) destroyPig(b);
+}
+
+function destroyBlock(block) {
+    block.alive = false;
+    score += MATERIALS[block.material].scoreVal;
+    spawnParticles(block.x, block.y, MATERIALS[block.material].color, 9);
+}
+
+function destroyPig(pig) {
+    pig.alive = false;
+    score += 550;
+    spawnParticles(pig.x, pig.y, '#4CAF50', 14);
+}
+
+function spawnParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+        particles.push(new Particle(x, y, color));
+    }
+}
+
+// Physics update (cleaned)
+function updatePhysics(dt) {
+    groundY = H * GROUND_Y_RATIO;
+
+    if (currentBird && currentBird.launched && currentBird.alive) {
+        currentBird.vy += GRAVITY * dt;
+        currentBird.x += currentBird.vx * dt;
+        currentBird.y += currentBird.vy * dt;
+
+        currentBird.trailTimer += dt;
+        if (currentBird.trailTimer > 0.028) {
+            trailPoints.push({ x: currentBird.x, y: currentBird.y, life: 1 });
+            currentBird.trailTimer = 0;
+        }
+
+        // Ground
+        if (currentBird.y + currentBird.r > groundY) {
+            currentBird.y = groundY - currentBird.r;
+            currentBird.vy *= -RESTITUTION * 0.55;
+            currentBird.vx *= FRICTION;
+            if (Math.abs(currentBird.vy) < 28) currentBird.vy = 0;
+        }
+
+        // Walls
+        if (currentBird.x + currentBird.r > W) { currentBird.x = W - currentBird.r; currentBird.vx *= -RESTITUTION * 0.55; }
+        if (currentBird.x - currentBird.r < 0) { currentBird.x = currentBird.r; currentBird.vx *= -RESTITUTION * 0.55; }
+
+        // Collisions
+        blocks.forEach(b => { if (b.alive && circleRect(currentBird.x, currentBird.y, currentBird.r, b.x, b.y, b.w, b.h)) resolveCollision(currentBird, b); });
+        pigs.forEach(p => { if (p.alive && circleCircle(currentBird.x, currentBird.y, currentBird.r, p.x, p.y, p.r)) resolveCollision(currentBird, p); });
+
+        let speed = Math.sqrt(currentBird.vx * currentBird.vx + currentBird.vy * currentBird.vy);
+        if (currentBird.x > W + 60 || currentBird.y > H + 60 || (speed < 18 && currentBird.launched)) {
+            settleTimer = SETTLE_TIME;
+            gameState = 'settling';
+        }
+    }
+
+    // Blocks physics
+    blocks.forEach(b => {
+        if (!b.alive) return;
+        b.vy += GRAVITY * dt;
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+
+        if (b.y + b.h/2 > groundY) {
+            b.y = groundY - b.h/2;
+            b.vy *= -RESTITUTION * 0.35;
+            b.vx *= FRICTION;
+            if (Math.abs(b.vy) < 18) b.vy = 0;
+        }
+        if (b.x - b.w/2 < 0) { b.x = b.w/2; b.vx *= -RESTITUTION; }
+        if (b.x + b.w/2 > W) { b.x = W - b.w/2; b.vx *= -RESTITUTION; }
+        if (Math.abs(b.vy) > 220 && b.y >= groundY - b.h/2 - 6) b.health -= Math.abs(b.vy) * 0.28;
+    });
+
+    // Pigs physics
+    pigs.forEach(p => {
+        if (!p.alive) return;
+        p.vy += GRAVITY * dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+
+        if (p.y + p.r > groundY) {
+            p.y = groundY - p.r;
+            p.vy *= -RESTITUTION * 0.35;
+            p.vx *= FRICTION;
+            if (Math.abs(p.vy) < 18) p.vy = 0;
+        }
+        blocks.forEach(b => { if (b.alive && circleRect(p.x, p.y, p.r, b.x, b.y, b.w, b.h)) resolveCollision(p, b); });
+
+        let spd = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
+        if (spd > 210) p.health -= spd * 0.16;
+    });
+
+    // Block-block collisions
+    for (let i = 0; i < blocks.length; i++) {
+        for (let j = i + 1; j < blocks.length; j++) {
+            if (!blocks[i].alive || !blocks[j].alive) continue;
+            if (Math.abs(blocks[i].x - blocks[j].x) < (blocks[i].w + blocks[j].w)/2 &&
+                Math.abs(blocks[i].y - blocks[j].y) < (blocks[i].h + blocks[j].h)/2) {
+                resolveCollision(blocks[i], blocks[j]);
+            }
+        }
+    }
+
+    // Particles and trails
+    particles.forEach(p => {
+        p.vy += GRAVITY * dt * 0.6;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+    });
+    particles = particles.filter(p => p.life > 0);
+
+    trailPoints.forEach(t => t.life -= dt * 2.2);
+    trailPoints = trailPoints.filter(t => t.life > 0);
+
+    // Settling logic
+    if (gameState === 'settling') {
+        settleTimer -= dt;
+        let allStopped = true;
+        blocks.forEach(b => { if (b.alive && Math.abs(b.vx) + Math.abs(b.vy) > 12) allStopped = false; });
+        pigs.forEach(p => { if (p.alive && Math.abs(p.vx) + Math.abs(p.vy) > 12) allStopped = false; });
+
+        if (settleTimer <= 0 || allStopped) {
+            let alivePigs = pigs.filter(p => p.alive).length;
+            if (alivePigs === 0) {
+                score += birdsRemaining * 1100;
+                SoundFX.play('levelComplete');
+                gameState = 'levelComplete';
+                showMessage('LEVEL COMPLETE!', 'Tap to continue');
+            } else if (birdsRemaining <= 0) {
+                gameState = 'gameOver';
+                showMessage('TRY AGAIN', 'Tap to retry level');
+            } else {
+                birdsRemaining--;
+                updateUI();
+                spawnBird();
+                gameState = 'aiming';
+            }
+        }
+    }
+
+    updateUI();
+}
+
+// Trajectory preview (dotted arc during aiming)
+function computeTrajectory() {
+    if (!currentBird || currentBird.launched || !dragging) return [];
+    const sx = slingX(), sy = slingY();
+    let dx = sx - currentBird.x;
+    let dy = sy - currentBird.y;
+    let vx = dx * 6.8, vy = dy * 6.8;
+    let px = currentBird.x, py = currentBird.y;
+    const pts = [];
+    for (let i = 0; i < 45; i++) {
+        pts.push({ x: px, y: py });
+        vy += GRAVITY * 0.032;
+        px += vx * 0.032;
+        py += vy * 0.032;
+        if (py > groundY) break;
+    }
+    return pts;
+}
+
+function drawTrajectory() {
+    const pts = computeTrajectory();
+    if (pts.length < 2) return;
+    for (let i = 0; i < pts.length; i += 3) {
+        ctx.beginPath();
+        ctx.arc(pts[i].x, pts[i].y, 2.5 - (i / pts.length) * 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,255,255,${0.65 - (i / pts.length) * 0.35})`;
+        ctx.fill();
+    }
+}
+
+function drawPowerMeter() {
+    if (!dragging || !currentBird || currentBird.launched) return;
+    const sx = slingX(), sy = slingY();
+    let dx = mouseX - sx;
+    let dy = mouseY - sy;
+    let dist = Math.sqrt(dx*dx + dy*dy);
+    let pct = Math.min(dist / SLING_MAX_DRAG, 1);
+
+    const barW = 8, barH = 60;
+    const barX = sx + 24, barY = sy - 30;
+
+    // Background
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+    ctx.fillStyle = 'rgba(40,40,40,0.6)';
+    ctx.fillRect(barX, barY, barW, barH);
+
+    // Fill (green -> yellow -> red)
+    let r, g;
+    if (pct < 0.5) {
+        const t = pct * 2;
+        r = Math.floor(76 + (255 - 76) * t);
+        g = 200;
+    } else {
+        const t = (pct - 0.5) * 2;
+        r = 255;
+        g = Math.floor(200 * (1 - t));
+    }
+    ctx.fillStyle = `rgb(${r},${g},50)`;
+    const fillH = barH * pct;
+    ctx.fillRect(barX, barY + barH - fillH, barW, fillH);
+
+    // Border
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, barY, barW, barH);
+}
+
+// Drawing functions (kept similar but polished)
+function drawSky() {
+    let grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#4FC3F7');
+    grad.addColorStop(0.55, '#81D4FA');
+    grad.addColorStop(1, '#B3E5FC');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    let t = Date.now() * 0.000028;
+    drawCloud(W*0.72 + Math.sin(t)*28, H*0.13, 58);
+    drawCloud(W*0.28 + Math.cos(t*0.65)*22, H*0.09, 42);
+    drawCloud(W*0.88 + Math.sin(t*1.2)*24, H*0.19, 48);
+}
+
+function drawCloud(x, y, size) {
+    ctx.beginPath();
+    ctx.arc(x, y, size * 0.5, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.38, y - size * 0.12, size * 0.33, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.68, y, size * 0.38, 0, Math.PI * 2);
+    ctx.arc(x + size * 0.32, y + size * 0.08, size * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function drawGround() {
+    groundY = H * GROUND_Y_RATIO;
+    let grad = ctx.createLinearGradient(0, groundY, 0, H);
+    grad.addColorStop(0, '#4CAF50');
+    grad.addColorStop(0.12, '#388E3C');
+    grad.addColorStop(0.28, '#8D6E63');
+    grad.addColorStop(1, '#5D4037');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, groundY, W, H - groundY);
+
+    ctx.strokeStyle = '#2E7D32';
+    ctx.lineWidth = 2.5;
+    for (let i = 0; i < W; i += 14) {
+        let h = 6 + Math.sin(i * 0.28) * 4.5;
+        ctx.beginPath(); ctx.moveTo(i, groundY); ctx.lineTo(i - 2, groundY - h); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(i + 6, groundY); ctx.lineTo(i + 8, groundY - h * 0.75); ctx.stroke();
+    }
+}
+
+function drawSlingshot() {
+    let sx = slingX(), sy = slingY();
+
+    ctx.fillStyle = '#5D4037';
+    ctx.fillRect(sx - 13, sy - 28, 9, 58);
+    ctx.fillStyle = '#795548';
+    ctx.fillRect(sx + 5, sy - 23, 9, 53);
+
+    if (currentBird && !currentBird.launched && dragging) {
+        ctx.strokeStyle = '#3E2723';
+        ctx.lineWidth = 4.5;
+        ctx.beginPath(); ctx.moveTo(sx - 11, sy - 33); ctx.lineTo(currentBird.x, currentBird.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sx + 11, sy - 33); ctx.lineTo(currentBird.x, currentBird.y); ctx.stroke();
+    } else if (currentBird && !currentBird.launched) {
+        ctx.strokeStyle = '#3E2723';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(sx - 11, sy - 33);
+        ctx.quadraticCurveTo(sx, sy - 18, sx + 11, sy - 33);
+        ctx.stroke();
+    }
+
+    if (currentBird && !currentBird.launched) {
+        drawBirdSprite(currentBird.x, currentBird.y, currentBird.r);
+    }
+
+    ctx.fillStyle = '#4E342E';
+    ctx.fillRect(sx - 19, sy + 27, 38, 11);
+}
+
+function drawBirdSprite(x, y, r) {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+    let grad = ctx.createRadialGradient(x - 3, y - 3, 0, x, y, r);
+    grad.addColorStop(0, '#FF5252'); grad.addColorStop(1, '#D32F2F');
+    ctx.fillStyle = grad; ctx.fill();
+
+    ctx.beginPath(); ctx.arc(x, y + 4, r * 0.52, 0, Math.PI * 2);
+    ctx.fillStyle = '#FFCDD2'; ctx.fill();
+
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(x - 5, y - 4, 5, 0, Math.PI * 2); ctx.arc(x + 5, y - 4, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#333';
+    ctx.beginPath(); ctx.arc(x - 4, y - 4, 2.6, 0, Math.PI * 2); ctx.arc(x + 6, y - 4, 2.6, 0, Math.PI * 2); ctx.fill();
+
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.moveTo(x - 10, y - 10); ctx.lineTo(x - 2, y - 8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + 10, y - 10); ctx.lineTo(x + 2, y - 8); ctx.stroke();
+
+    ctx.fillStyle = '#FFC107';
+    ctx.beginPath(); ctx.moveTo(x - 4, y + 2); ctx.lineTo(x + 4, y + 2); ctx.lineTo(x, y + 8); ctx.closePath(); ctx.fill();
+}
+
+function drawBlock(b) {
+    if (!b.alive) return;
+    let healthPct = b.health / b.maxHealth;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.fillRect(b.x - b.w/2 + 3.5, b.y - b.h/2 + 3.5, b.w, b.h);
+
+    ctx.fillStyle = MATERIALS[b.material].color;
+    ctx.fillRect(b.x - b.w/2, b.y - b.h/2, b.w, b.h);
+
+    ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+    ctx.lineWidth = 1;
+    if (b.material === 'wood') {
+        for (let i = -b.h/2 + 9; i < b.h/2; i += 11) {
+            ctx.beginPath(); ctx.moveTo(b.x - b.w/2, b.y + i); ctx.lineTo(b.x + b.w/2, b.y + i); ctx.stroke();
+        }
+    }
+
+    if (healthPct < 0.65) {
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(b.x - b.w/2 + 4, b.y - b.h/2 + 4);
+        ctx.lineTo(b.x + 6, b.y);
+        ctx.lineTo(b.x + b.w/2 - 5, b.y + b.h/2 - 4);
+        ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(b.x - b.w/2, b.y - b.h/2, b.w, b.h);
+}
+
+function drawPig(p) {
+    if (!p.alive) return;
+    let healthPct = p.health / p.maxHealth;
+
+    ctx.beginPath();
+    ctx.ellipse(p.x + 3, p.y + p.r + 2.5, p.r * 0.75, 4.5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.fill();
+
+    let grad = ctx.createRadialGradient(p.x - 3, p.y - 3, 0, p.x, p.y, p.r);
+    grad.addColorStop(0, '#8BC34A'); grad.addColorStop(1, '#558B2F');
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fillStyle = grad; ctx.fill();
+
+    ctx.fillStyle = '#689F38';
+    ctx.beginPath(); ctx.ellipse(p.x - p.r + 4, p.y - p.r + 5, 6, 10, -0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(p.x + p.r - 4, p.y - p.r + 5, 6, 10, 0.3, 0, Math.PI * 2); ctx.fill();
+
+    ctx.fillStyle = '#AED581';
+    ctx.beginPath(); ctx.ellipse(p.x, p.y + 4, p.r * 0.48, p.r * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+
+    ctx.fillStyle = '#33691E';
+    ctx.beginPath(); ctx.arc(p.x - 4, p.y + 4, 2.6, 0, Math.PI * 2); ctx.arc(p.x + 4, p.y + 4, 2.6, 0, Math.PI * 2); ctx.fill();
+
+    let eyeY = p.y - 3;
+    if (healthPct < 0.45) {
+        ctx.strokeStyle = '#333'; ctx.lineWidth = 1.8;
+        [-6, 6].forEach(ex => {
+            ctx.beginPath(); ctx.moveTo(p.x + ex - 3, eyeY - 3); ctx.lineTo(p.x + ex + 3, eyeY + 3); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(p.x + ex + 3, eyeY - 3); ctx.lineTo(p.x + ex - 3, eyeY + 3); ctx.stroke();
+        });
+    } else {
+        ctx.fillStyle = 'white';
+        ctx.beginPath(); ctx.arc(p.x - 6, eyeY, 5.2, 0, Math.PI * 2); ctx.arc(p.x + 6, eyeY, 5.2, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#333';
+        ctx.beginPath(); ctx.arc(p.x - 5, eyeY, 2.6, 0, Math.PI * 2); ctx.arc(p.x + 7, eyeY, 2.6, 0, Math.PI * 2); ctx.fill();
+    }
+
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.stroke();
+}
+
+function drawTrail() {
+    if (trailPoints.length < 2) return;
+    for (let i = 1; i < trailPoints.length; i++) {
+        let t = trailPoints[i], prev = trailPoints[i-1];
+        ctx.strokeStyle = `rgba(255,255,255,${t.life * 0.38})`;
+        ctx.lineWidth = 2.2;
+        ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(t.x, t.y); ctx.stroke();
+    }
+}
+
+function drawBirdQueue() {
+    let startX = slingX() - 32;
+    let startY = groundY + 22;
+    for (let i = birds.length - birdsRemaining + 1; i < birds.length; i++) {
+        if (i >= birds.length) break;
+        drawBirdSprite(startX - (birds.length - birdsRemaining - (i - birdsRemaining + 1)) * 28, startY, 11);
+    }
+}
+
+// Input
+let mouseX = 0, mouseY = 0;
+
+function getPos(e) {
+    let rect = canvas.getBoundingClientRect();
+    if (e.touches && e.touches.length > 0) {
+        return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+    }
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+
+function onMove(e) {
+    e.preventDefault();
+    let pos = getPos(e);
+    mouseX = pos.x; mouseY = pos.y;
+
+    if (dragging && currentBird && !currentBird.launched) {
+        let dx = mouseX - slingX();
+        let dy = mouseY - slingY();
+        let dist = Math.sqrt(dx*dx + dy*dy);
+        const now = performance.now();
+        if (now - lastStretchTime > 100) { SoundFX.play('stretch'); lastStretchTime = now; }
+        if (dist > SLING_MAX_DRAG) {
+            dx = dx / dist * SLING_MAX_DRAG;
+            dy = dy / dist * SLING_MAX_DRAG;
+        }
+        currentBird.x = slingX() + dx;
+        currentBird.y = slingY() + dy;
+    }
+}
+
+function onUp(e) {
+    e.preventDefault();
+    if (dragging && currentBird && !currentBird.launched) {
+        let dx = slingX() - currentBird.x;
+        let dy = slingY() - currentBird.y;
+        let power = 6.8;
+        currentBird.vx = dx * power;
+        currentBird.vy = dy * power;
+        SoundFX.play('launch');
+        currentBird.launched = true;
+        dragging = false;
+        gameState = 'flying';
+    }
+}
+
+// Dash activation on tap during flight
+function tryDash() {
+    if (currentBird && currentBird.launched && !currentBird.dashed && currentBird.alive) {
+        const speed = Math.sqrt(currentBird.vx * currentBird.vx + currentBird.vy * currentBird.vy);
+        if (speed > 10) {
+            const boost = 350;
+            currentBird.vx += (currentBird.vx / speed) * boost;
+            currentBird.vy += (currentBird.vy / speed) * boost;
+            currentBird.dashed = true;
+            SoundFX.play('launch');
+            for (let i = 0; i < 12; i++) {
+                particles.push(new Particle(currentBird.x, currentBird.y, '#FFD700'));
+            }
+        }
+    }
+}
+
+// Combined onDown with dash support
+function onDown(e) {
+    e.preventDefault();
+    let pos = getPos(e);
+    mouseX = pos.x; mouseY = pos.y;
+
+    if (gameState === 'flying' && currentBird && !currentBird.dashed && currentBird.alive) {
+        tryDash();
+    } else if (gameState === 'aiming' && currentBird && !currentBird.launched) {
+        let dx = mouseX - slingX();
+        let dy = mouseY - slingY();
+        if (Math.sqrt(dx*dx + dy*dy) < 85) {
+            initAudio();
+            dragging = true;
+            dragStartX = mouseX;
+            dragStartY = mouseY;
+        }
+    } else if (gameState === 'menu' || gameState === 'levelComplete' || gameState === 'gameOver' || gameState === 'win') {
+        initAudio();
+        handleMessageClick();
+    }
+}
+
+canvas.addEventListener('mousedown', onDown);
+canvas.addEventListener('mousemove', onMove);
+canvas.addEventListener('mouseup', onUp);
+canvas.addEventListener('touchstart', onDown, { passive: false });
+canvas.addEventListener('touchmove', onMove, { passive: false });
+canvas.addEventListener('touchend', onUp, { passive: false });
+
+// Game loop
+let lastTime = 0;
+function gameLoop(timestamp) {
+    let dt = Math.min((timestamp - lastTime) / 1000, 0.055);
+    lastTime = timestamp;
+
+    if (gameState === 'playing' || gameState === 'flying' || gameState === 'settling' || gameState === 'aiming') {
+        updatePhysics(dt);
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    drawSky();
+    drawGround();
+    if (gameState === 'aiming' && dragging) drawTrajectory();
+    drawPowerMeter();
+    drawTrail();
+
+    blocks.forEach(b => drawBlock(b));
+    pigs.forEach(p => drawPig(p));
+
+    if (!currentBird || !currentBird.launched) {
+        drawSlingshot();
+    } else {
+        let sx = slingX(), sy = slingY();
+        ctx.fillStyle = '#5D4037';
+        ctx.fillRect(sx - 13, sy - 28, 9, 58);
+    }
+
+    if (currentBird && currentBird.launched && currentBird.alive) {
+        drawBirdSprite(currentBird.x, currentBird.y, currentBird.r);
+    }
+
+    particles.forEach(p => {
+        ctx.globalAlpha = p.life / p.maxLife;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+    });
+    ctx.globalAlpha = 1;
+
+    drawBirdQueue();
+
+    requestAnimationFrame(gameLoop);
+}
+
+// Start the game
+showMessage('ANGRY BIRDS', 'Tap to play');
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
