@@ -109,7 +109,7 @@ const SoundFX = {
 };
 
 // Physics constants
-const GRAVITY = 980;
+const GRAVITY = 850;
 const GROUND_Y_RATIO = 0.82;
 let groundY;
 const RESTITUTION = 0.4;
@@ -123,10 +123,10 @@ let gameState = 'menu';
 let settleTimer = 0;
 const SETTLE_TIME = 2.2;
 
-// Slingshot
+// Slingshot — drag scales with screen width so birds can reach distant targets
 const slingX = () => W * 0.18;
 const slingY = () => groundY - 55;
-const SLING_MAX_DRAG = 95;
+function SLING_MAX_DRAG() { return Math.min(W * 0.18, 160); }
 
 // Entities
 let birds = [];
@@ -287,7 +287,8 @@ function loadLevel(idx) {
             });
             if (struct.pigs) {
                 struct.pigs.forEach(p => {
-                    pigs.push(new Pig(bx + (p.dx || 0), groundY - totalH - p.dy));
+                    // Place pig just above the highest block surface (totalH includes trailing gap)
+                    pigs.push(new Pig(bx + (p.dx || 0), groundY - (totalH - 6) + p.dy));
                 });
             }
         } else if (struct.type === 'fort') {
@@ -591,7 +592,7 @@ function computeTrajectory() {
     const sx = slingX(), sy = slingY();
     let dx = sx - currentBird.x;
     let dy = sy - currentBird.y;
-    let vx = dx * 6.8, vy = dy * 6.8;
+    let vx = dx * 7.5, vy = dy * 7.5;
     let px = currentBird.x, py = currentBird.y;
     const pts = [];
     for (let i = 0; i < 45; i++) {
@@ -621,7 +622,7 @@ function drawPowerMeter() {
     let dx = mouseX - sx;
     let dy = mouseY - sy;
     let dist = Math.sqrt(dx*dx + dy*dy);
-    let pct = Math.min(dist / SLING_MAX_DRAG, 1);
+    let pct = Math.min(dist / SLING_MAX_DRAG(), 1);
 
     const barW = 8, barH = 60;
     const barX = sx + 24, barY = sy - 30;
@@ -865,9 +866,9 @@ function onMove(e) {
         let dist = Math.sqrt(dx*dx + dy*dy);
         const now = performance.now();
         if (now - lastStretchTime > 100) { SoundFX.play('stretch'); lastStretchTime = now; }
-        if (dist > SLING_MAX_DRAG) {
-            dx = dx / dist * SLING_MAX_DRAG;
-            dy = dy / dist * SLING_MAX_DRAG;
+        if (dist > SLING_MAX_DRAG()) {
+            dx = dx / dist * SLING_MAX_DRAG();
+            dy = dy / dist * SLING_MAX_DRAG();
         }
         currentBird.x = slingX() + dx;
         currentBird.y = slingY() + dy;
@@ -879,7 +880,7 @@ function onUp(e) {
     if (dragging && currentBird && !currentBird.launched) {
         let dx = slingX() - currentBird.x;
         let dy = slingY() - currentBird.y;
-        let power = 6.8;
+        let power = 7.5;
         currentBird.vx = dx * power;
         currentBird.vy = dy * power;
         SoundFX.play('launch');
